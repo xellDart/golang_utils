@@ -12,13 +12,15 @@ import (
 	"bytes"
 	"strconv"
 	"time"
-	"io"
 	"image"
+	"encoding/base64"
+	"bufio"
 )
 
 const (
 	zero       = "0"
 	dateLayout = "20060102"
+	filename = "barcode.png"
 )
 
 type Configuration struct {
@@ -32,12 +34,9 @@ type Configuration struct {
 	Height           int `json:"barcode_height"`
 }
 
-// Pixel struct example
-type Pixel struct {
-	R int
-	G int
-	B int
-	A int
+type Image struct {
+	Code string `json:"number_bar_code"`
+	Code64  string `json:"image"`
 }
 
 func (c *Configuration) fixReference(ref string) string {
@@ -71,7 +70,7 @@ func (c *Configuration) fixAmount(amount string) string {
 
 func (c *Configuration) verifyLength() (bool, int) {
 	temp := c.AmountLength + c.AmountDecimal + c.ReferenceLength + len(returnData(c.PrefixIdentifier)) + len(c.verifyDate())
-	if temp < c.Length - 1 {
+	if temp < c.Length-1 {
 		return true, c.Length - 1 - temp
 	}
 	return false, 0
@@ -83,6 +82,7 @@ func (c *Configuration) verifyDate() string {
 	diff := t.Add(daysValidity)
 	return diff.Format(dateLayout)
 }
+
 // Generate oxxo barcode with base10
 func (c *Configuration) toBase10(amount float64) string {
 	var tempRest string
@@ -93,22 +93,22 @@ func (c *Configuration) toBase10(amount float64) string {
 	if check {
 		tempRest = returnAppendZero(rest)
 	}
-	s := []string{returnData(c.PrefixIdentifier), c.fixReference(returnData(12345)), c.verifyDate(), tempRest, c.fixAmount(tempAmount)}
-	println("Code without check digit",returnConcat(s))
-	a := reverse(returnConcat(s))
-	for _ , char := range a {
+	s := returnConcat([]string{returnData(c.PrefixIdentifier), c.fixReference(returnData(12345)), c.verifyDate(), tempRest, c.fixAmount(tempAmount)})
+	println("Code without check digit", s)
+	a := reverse(s)
+	for _, char := range a {
 		i64, _ := convertToInt(fmt.Sprintf("%c", char))
 		if sumC {
 			sumC = false
-			sum+= i64 * 2
+			sum += i64 * 2
 		} else {
 			sumC = true
-			sum+= i64
+			sum += i64
 		}
 	}
 
-	result := 10 - (sum%10)
-	return returnConcat(s) + returnData(result)
+	result := 10 - (sum % 10)
+	return s + returnData(result)
 }
 
 // Generate oxxo barcode with 1-3-7
@@ -122,22 +122,22 @@ func (c *Configuration) to137(amount float64) string {
 		tempRest = returnAppendZero(rest)
 	}
 	s := []string{returnData(c.PrefixIdentifier), c.fixReference(returnData(12345)), c.verifyDate(), tempRest, c.fixAmount(tempAmount)}
-	println("Code without check digit",returnConcat(s))
+	println("Code without check digit", returnConcat(s))
 	a := reverse(returnConcat(s))
-	for _ , char := range a {
+	for _, char := range a {
 		i64, _ := convertToInt(fmt.Sprintf("%c", char))
 		if sumC == 0 {
 			sumC = 3
-			sum+= i64
-		} else if sumC == 3{
+			sum += i64
+		} else if sumC == 3 {
 			sumC = 7
-			sum+= i64 * 3
+			sum += i64 * 3
 		} else if sumC == 7 {
 			sumC = 0
-			sum+= i64 * 7
+			sum += i64 * 7
 		}
 	}
-	result := (sum%9) + 1
+	result := (sum % 9) + 1
 	return returnConcat(s) + returnData(result)
 }
 
@@ -152,14 +152,17 @@ func (c *Configuration) checkAmount(amount float64) (string, error) {
 	return i, err
 }
 
-func (c *Configuration)buildCode(data string){
+func (c *Configuration) buildCode(data string) {
 	image.RegisterFormat("png", "png", png.Decode, png.DecodeConfig)
 	code, _ := code128.Encode(data)
 	scaledCode, _ := barcode.Scale(code, c.Width, c.Height)
-	file, _ := os.Create("barcode.png")
+	file, _ := os.Create(filename)
 	defer file.Close()
 	png.Encode(file, scaledCode)
-	generatePixelArray()
+	b, err := json.Marshal(Image{Code: data, Code64: getBase64(filename)})
+	if err != nil {}
+	os.Remove(filename)
+	err = ioutil.WriteFile("output.json", b, 0644)
 }
 
 func reverse(s string) string {
@@ -205,65 +208,40 @@ func returnConcat(data []string) string {
 	return buffer.String()
 }
 
-func generatePixelArray(){
-	file, err := os.Open("./barcode.png")
-	defer file.Close()
-	pixels, err := getPixels(file)
-	if err != nil {
-		println(err.Error())
-		fmt.Println("Error: Image could not be decoded")
-		os.Exit(1)
-	}
-	b, err := json.Marshal(pixels)
+func getBase64(fileName string) string {
+	imgFile, err := os.Open(fileName)
+
 	if err != nil {
 		fmt.Println(err)
-		return
+		os.Exit(1)
 	}
-	var img [][]Pixel
-	json.Unmarshal(b, &img)
-	fmt.Printf("Results: %v\n", img)
+
+	defer imgFile.Close()
+
+	fInfo, _ := imgFile.Stat()
+	var size = fInfo.Size()
+	buf := make([]byte, size)
+
+	fReader := bufio.NewReader(imgFile)
+	fReader.Read(buf)
+
+	imgBase64Str := base64.StdEncoding.EncodeToString(buf)
+	return imgBase64Str
 }
 
-func generateCode() {
+func generateCode(amount float64) {
 	c := getConfiguration()
 	if check, num := c.verifyLength(); check {
 		if num > c.Length {
 			println("Bad Length")
+			return
 		}
-		response := c.to137(435.00)
+		response := c.toBase10(amount)
 		println("Code with check digit", response)
 		c.buildCode(response)
 	}
 }
 
-// Get the bi-dimensional pixel array
-func getPixels(file io.Reader) ([][]Pixel, error) {
-	img, _, err := image.Decode(file)
-
-	if err != nil {
-		return nil, err
-	}
-
-	bounds := img.Bounds()
-	width, height := bounds.Max.X, bounds.Max.Y
-
-	var pixels [][]Pixel
-	for y := 0; y < height; y++ {
-		var row []Pixel
-		for x := 0; x < width; x++ {
-			row = append(row, rgbaToPixel(img.At(x, y).RGBA()))
-		}
-		pixels = append(pixels, row)
-	}
-
-	return pixels, nil
-}
-
-// img.At(x, y).RGBA() returns four uint32 values; we want a Pixel
-func rgbaToPixel(r uint32, g uint32, b uint32, a uint32) Pixel {
-	return Pixel{int(r / 257), int(g / 257), int(b / 257), int(a / 257)}
-}
-
 func main() {
-	generateCode()
+	generateCode(345.00)
 }
